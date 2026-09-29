@@ -104,6 +104,7 @@ input,button{font:inherit;min-height:44px;border-radius:8px}
 input{width:100%;padding:0 12px;border:1px solid var(--line);background:var(--bg);color:var(--ink)}
 button{border:0;padding:0 16px;background:var(--act);color:var(--on);font-weight:600;cursor:pointer}
 .seg{display:flex;gap:8px;margin-bottom:10px}
+.seg.sub{margin-top:-2px}.seg.sub button{min-height:36px;font-size:13px}
 .seg button{flex:1;background:transparent;color:var(--ink);border:1px solid var(--line)}
 .seg button[aria-pressed=true]{background:var(--act);color:var(--on);border-color:var(--act)}
 form.act{display:grid;gap:8px}
@@ -126,7 +127,7 @@ const clean=o=>{const s=fresh();try{T.forEach(t=>{const f=o.funds[t]||{};s.funds
 let state=fresh(),ref=null,sync='Getting live prices…';
 try{state=clean(JSON.parse(localStorage.getItem(KEY)))}catch(e){}
 const save=()=>{try{localStorage.setItem(KEY,JSON.stringify(state))}catch(e){}};
-const ui={mode:{},msg:{}};
+const ui={mode:{},by:{},msg:{}};
 const cad=n=>n.toLocaleString('en-CA',{style:'currency',currency:'CAD'});
 const signed=n=>(n<0?'−':'+')+cad(Math.abs(n));
 const pct=n=>(n<0?'−':'+')+Math.abs(n).toFixed(2)+'%';
@@ -141,15 +142,19 @@ function render(){
   const max=Math.max(1,...T.flatMap(t=>[state.funds[t].invested,val(state.funds[t])||0]));
   const h=n=>Math.round((n||0)/max*100);
   const cards=T.map(t=>{
-    const f=state.funds[t],v=val(f),mode=ui.mode[t]||'add',add=mode==='add';
+    const f=state.funds[t],v=val(f),mode=ui.mode[t]||'add',add=mode==='add',by=ui.by[t]||'amount';
     if(f.shares>0){held++;ti+=f.invested;if(v==null)unpriced++;else tv+=v}
     const g=v==null?null:v-f.invested;
+    const addFields=by==='shares'
+      ?`<div class="row">${num('price','Purchase price')}${num('shares','Number of shares')}</div>`
+      :`<div class="row">${num('price','Purchase price')}${num('amount','Amount invested')}</div>`;
     return `<section class="card"><div class="top"><h2>${t}</h2>
 <b>${f.price?cad(f.price):'–'}</b></div>
 <p class="mute small">${f.price?`Price ${cad(f.price)} as of ${when(f.at)}`:'Waiting for a live price.'}</p>
 <dl class="stats"><div><dt>Shares</dt><dd>${f.shares.toFixed(4)}</dd></div><div><dt>Invested</dt><dd>${cad(f.invested)}</dd></div><div><dt>Value</dt><dd>${v==null?'–':cad(v)}</dd></div><div><dt>Gain</dt><dd class="${g==null?'':cls(g)}">${g==null?'–':`${signed(g)} (${pct(g/f.invested*100)})`}</dd></div></dl>
 <div class="seg"><button type="button" data-t="${t}" data-mode="add" aria-pressed="${add}">Add</button><button type="button" data-t="${t}" data-mode="remove" aria-pressed="${!add}">Remove</button></div>
-<form class="act" data-t="${t}" data-a="${mode}">${add?`<div class="row">${num('price','Purchase price')}${num('amount','Amount invested')}</div>`:num('amount','Amount to remove')}<button>${add?'Add investment':'Remove amount'}</button></form>
+${add?`<div class="seg sub"><button type="button" data-t="${t}" data-addby="amount" aria-pressed="${by==='amount'}">By $ amount</button><button type="button" data-t="${t}" data-addby="shares" aria-pressed="${by==='shares'}">By share count</button></div>`:''}
+<form class="act" data-t="${t}" data-a="${add?'add':'remove'}" data-by="${by}">${add?addFields:num('amount','Amount to remove')}<button>${add?'Add investment':'Remove amount'}</button></form>
 <p class="msg" role="status">${ui.msg[t]||''}</p></section>`}).join('');
   const bars=T.map((t,i)=>{const f=state.funds[t],v=val(f),x=50+i*130;
     return `<rect class="b1" x="${x}" y="${120-h(f.invested)}" width="36" height="${h(f.invested)}" rx="3"/><rect class="b2" x="${x+42}" y="${120-h(v)}" width="36" height="${h(v)}" rx="3"/><text class="t" x="${x+39}" y="140" text-anchor="middle">${t}</text>`}).join('');
@@ -161,10 +166,21 @@ function render(){
 <p class="mute small" style="margin-top:16px">Prices come from Yahoo Finance and may be delayed.</p>`;
 }
 
-function act(t,a,x){
+function act(t,a,by,x){
   const f=state.funds[t],now=new Date().toISOString();let m='';
   if(a==='price'){const p=x('v');if(!(p>0))return;f.price=p;f.at=now;m='Price updated.'}
-  else if(a==='add'){const p=x('price'),n=x('amount');if(!(p>0&&n>0))return;f.shares+=n/p;f.invested+=n;if(!f.price){f.price=p;f.at=now}m=`Added ${cad(n)} at ${cad(p)}.`}
+  else if(a==='add'){
+    const p=x('price');
+    if(by==='shares'){
+      const sh=x('shares');if(!(p>0&&sh>0))return;
+      f.shares+=sh;f.invested+=sh*p;if(!f.price){f.price=p;f.at=now}
+      m=`Added ${sh.toFixed(4)} shares at ${cad(p)}.`;
+    }else{
+      const n=x('amount');if(!(p>0&&n>0))return;
+      f.shares+=n/p;f.invested+=n;if(!f.price){f.price=p;f.at=now}
+      m=`Added ${cad(n)} at ${cad(p)}.`;
+    }
+  }
   else{const n=x('amount');if(!(n>0))return;
     if(f.invested<=0)m='Nothing to remove yet.';
     else if(n>f.invested+0.005)m=`You can remove up to ${cad(f.invested)}.`;
@@ -173,8 +189,11 @@ function act(t,a,x){
 }
 
 
-app.addEventListener('submit',e=>{e.preventDefault();const f=e.target,d=new FormData(f);act(f.dataset.t,f.dataset.a,k=>parseFloat(d.get(k)))});
-app.addEventListener('click',e=>{const b=e.target.closest('[data-mode]');if(!b)return;ui.mode[b.dataset.t]=b.dataset.mode;ui.msg[b.dataset.t]='';render()});
+app.addEventListener('submit',e=>{e.preventDefault();const f=e.target,d=new FormData(f);act(f.dataset.t,f.dataset.a,f.dataset.by,k=>parseFloat(d.get(k)))});
+app.addEventListener('click',e=>{
+  const m=e.target.closest('[data-mode]');if(m){ui.mode[m.dataset.t]=m.dataset.mode;ui.msg[m.dataset.t]='';render();return}
+  const ab=e.target.closest('[data-addby]');if(ab){ui.by[ab.dataset.t]=ab.dataset.addby;ui.msg[ab.dataset.t]='';render()}
+});
 
 render();
 
