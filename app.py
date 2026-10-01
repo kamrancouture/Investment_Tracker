@@ -7,14 +7,17 @@ Deploy:       gunicorn app:app
 import base64
 import os
 import time
+from datetime import datetime, timedelta, timezone
 
 import yfinance as yf
 from flask import Flask, Response, abort, jsonify
 
 FUNDS = ["VFV.TO", "VSP.TO"]
 CACHE_SECONDS = 45
+HISTORY_CACHE_SECONDS = 300
 app = Flask(__name__)
 _cache = {"at": 0.0, "prices": {}}
+_history_cache = {}
 
 
 def fetch_price(ticker):
@@ -23,6 +26,26 @@ def fetch_price(ticker):
         return value if value > 0 else None
     except Exception:
         return None
+
+
+def fetch_history(ticker):
+    cached = _history_cache.get(ticker)
+    if cached and time.time() - cached[0] < HISTORY_CACHE_SECONDS:
+        return cached[1]
+    points = cached[1] if cached else []
+    try:
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(days=3)
+        data = yf.Ticker(ticker).history(start=start, end=end, interval="15m")
+        points = [
+            {"t": idx.isoformat(), "p": round(float(close), 4)}
+            for idx, close in data["Close"].items()
+            if close == close  # drop NaN rows
+        ]
+    except Exception:
+        pass  # keep whatever was cached before, even if stale
+    _history_cache[ticker] = (time.time(), points)
+    return points
 
 
 @app.route("/")
@@ -36,6 +59,15 @@ def prices():
         _cache["prices"] = {t: fetch_price(t) or _cache["prices"].get(t) for t in FUNDS}
         _cache["at"] = time.time()
     response = jsonify(_cache["prices"])
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.route("/api/history/<ticker>")
+def history(ticker):
+    if ticker not in FUNDS:
+        abort(404)
+    response = jsonify(fetch_history(ticker))
     response.headers["Cache-Control"] = "no-store"
     return response
 
@@ -119,22 +151,33 @@ svg{width:100%;height:auto;display:block;margin-top:8px}
 details.hist{margin-top:10px}
 details.hist summary{cursor:pointer}
 ul.hlist{list-style:none;margin:8px 0 0;padding:0;max-height:160px;overflow-y:auto;border-top:1px solid var(--line)}
-ul.hlist li{display:flex;justify-content:space-between;gap:10px;padding:7px 0;border-bottom:1px solid var(--line);font-size:13px}
+ul.hlist li{padding:7px 0;border-bottom:1px solid var(--line);font-size:13px}
 ul.hlist li:last-child{border-bottom:0}
 ul.hlist .add{color:var(--gain)}ul.hlist .rem{color:var(--loss)}
+.hrow{display:flex;justify-content:space-between;gap:10px;width:100%;background:none;border:0;padding:0;margin:0;font:inherit;color:inherit;text-align:left;cursor:pointer}
+.hrow:hover,.hrow:focus-visible{text-decoration:underline}
 label.field{display:block;margin:2px 0 -2px}
+.tkr{display:inline-block;background:none;border:0;padding:0;margin:0;font:inherit;font-size:19px;font-weight:700;color:var(--ink);cursor:pointer;text-decoration:underline dotted;text-decoration-color:var(--line);text-underline-offset:4px}
+.tkr:hover,.tkr:focus-visible{color:var(--act);text-decoration-color:var(--act)}
+.modal-back{position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;padding:20px;z-index:50}
+.modal{background:var(--card);border-radius:12px;padding:18px;max-width:420px;width:100%;max-height:85vh;overflow-y:auto}
+.modal-top{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px}
+.modal-top h2{font-size:17px}
+.danger{background:var(--loss);width:100%;margin-top:14px}
 </style>
 </head>
 <body>
 <main id="app"></main>
 <script>
 const T=['VFV.TO','VSP.TO'],KEY='investment-tracker-v1',app=document.getElementById('app');
+const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,8);
 const fresh=()=>({funds:Object.fromEntries(T.map(t=>[t,{shares:0,invested:0,price:null,at:null,history:[]}]))});
-const clean=o=>{const s=fresh();try{T.forEach(t=>{const f=(o.funds&&o.funds[t])||{};const hist=Array.isArray(f.history)?f.history.filter(h=>h&&typeof h.t==='string').map(h=>({t:h.t,kind:h.kind==='remove'?'remove':'add',amount:+h.amount||0,shares:h.shares!=null&&isFinite(+h.shares)?+h.shares:null,price:h.price!=null&&isFinite(+h.price)?+h.price:null})):[];s.funds[t]={shares:+f.shares||0,invested:+f.invested||0,price:+f.price>0?+f.price:null,at:f.at||null,history:hist}})}catch(e){}return s};
+const clean=o=>{const s=fresh();try{T.forEach(t=>{const f=(o.funds&&o.funds[t])||{};const hist=Array.isArray(f.history)?f.history.filter(h=>h&&typeof h.t==='string').map(h=>({id:h.id||uid(),t:h.t,kind:h.kind==='remove'?'remove':'add',amount:+h.amount||0,shares:h.shares!=null&&isFinite(+h.shares)?+h.shares:null,price:h.price!=null&&isFinite(+h.price)?+h.price:null})):[];s.funds[t]={shares:+f.shares||0,invested:+f.invested||0,price:+f.price>0?+f.price:null,at:f.at||null,history:hist}})}catch(e){}return s};
 let state=fresh(),ref=null,sync='Getting live prices…';
 try{state=clean(JSON.parse(localStorage.getItem(KEY)))}catch(e){}
 const save=()=>{try{localStorage.setItem(KEY,JSON.stringify(state))}catch(e){}};
-const ui={mode:{},by:{},msg:{}};
+const ui={mode:{},by:{},msg:{},view:null};
+let historyCache={};
 const cad=n=>n.toLocaleString('en-CA',{style:'currency',currency:'CAD'});
 const signed=n=>(n<0?'−':'+')+cad(Math.abs(n));
 const pct=n=>(n<0?'−':'+')+Math.abs(n).toFixed(2)+'%';
@@ -162,9 +205,9 @@ function render(){
       const line=hh.kind==='add'
         ?`+${cad(hh.amount)}${hh.shares!=null?` · ${hh.shares.toFixed(4)} sh`:''}${hh.price!=null?` · ${cad(hh.price)}/sh`:''}`
         :`−${cad(hh.amount)}${hh.shares!=null?` · ${hh.shares.toFixed(4)} sh`:''}`;
-      return `<li><span class="${hh.kind==='add'?'add':'rem'}">${line}</span><span class="mute">${when(hh.t)}</span></li>`;
+      return `<li><button type="button" class="hrow" data-t="${t}" data-id="${hh.id}"><span class="${hh.kind==='add'?'add':'rem'}">${line}</span><span class="mute">${when(hh.t)}</span></button></li>`;
     }).join(''):'<li class="mute">No deposits yet.</li>';
-    return `<section class="card"><div class="top"><h2>${t}</h2>
+    return `<section class="card"><div class="top"><button type="button" class="tkr" data-t="${t}" data-chart>${t}</button>
 <b>${f.price?cad(f.price):'–'}</b></div>
 <p class="mute small">${f.price?`Price ${cad(f.price)} as of ${when(f.at)}`:'Waiting for a live price.'}</p>
 <dl class="stats"><div><dt>Shares</dt><dd>${f.shares.toFixed(4)}</dd></div><div><dt>Invested</dt><dd>${cad(f.invested)}</dd></div><div><dt>Value</dt><dd>${v==null?'–':cad(v)}</dd></div><div><dt>Gain</dt><dd class="${g==null?'':cls(g)}">${g==null?'–':`${signed(g)} (${pct(g/f.invested*100)})`}</dd></div></dl>
@@ -176,11 +219,70 @@ ${add?`<div class="seg sub"><button type="button" data-t="${t}" data-addby="amou
   const bars=T.map((t,i)=>{const f=state.funds[t],v=val(f),x=50+i*130;
     return `<rect class="b1" x="${x}" y="${120-h(f.invested)}" width="36" height="${h(f.invested)}" rx="3"/><rect class="b2" x="${x+42}" y="${120-h(v)}" width="36" height="${h(v)}" rx="3"/><text class="t" x="${x+39}" y="140" text-anchor="middle">${t}</text>`}).join('');
   const g=tv-ti,ok=held>0&&!unpriced;
-  app.innerHTML=`<h1>Investment Tracker</h1><p class="mute small"><span id="sync">${sync}</span><button type="button" class="ghost" data-refresh>Refresh</button></p>
+  app.innerHTML=`<h1>Investment Tracker</h1><p class="mute small"><span id="sync">${sync}</span><button type="button" class="ghost" data-refresh>Refresh</button><button type="button" class="ghost" data-reset>Reset all data</button></p>
 <section class="sum"><p class="mute">Portfolio value</p><p class="big">${ok?cad(tv):held?'Loading…':cad(0)}</p>
 <p class="${ok?cls(g):'mute'}">${ok?`${signed(g)} (${pct(g/ti*100)}) on ${cad(ti)} invested`:held?'Waiting for live prices.':'Add your first investment below.'}</p></section>${cards}
 <section class="card"><h2>Invested and current value</h2><svg viewBox="0 0 300 150" role="img" aria-label="Invested versus current value for each fund">${bars}</svg><div class="key"><span><i class="k1"></i>Invested</span><span><i class="k2"></i>Value</span></div></section>
-<p class="mute small" style="margin-top:16px">Prices come from Yahoo Finance and may be delayed.</p>`;
+<p class="mute small" style="margin-top:16px">Prices come from Yahoo Finance and may be delayed.</p>${renderModal()}`;
+}
+
+function renderChartSVG(points){
+  if(!points.length)return '<p class="mute small">No price history available right now.</p>';
+  const xs=points.map(p=>new Date(p.t).getTime()),ys=points.map(p=>p.p);
+  const minX=Math.min(...xs),maxX=Math.max(...xs),minY=Math.min(...ys),maxY=Math.max(...ys);
+  const W=320,H=140,pad=8;
+  const sx=x=>pad+(x-minX)/((maxX-minX)||1)*(W-2*pad);
+  const sy=y=>H-pad-(y-minY)/((maxY-minY)||1)*(H-2*pad);
+  const path=points.map((p,i)=>`${i?'L':'M'}${sx(new Date(p.t).getTime()).toFixed(1)},${sy(p.p).toFixed(1)}`).join('');
+  const up=points[points.length-1].p>=points[0].p;
+  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Price over the last 3 days"><path d="${path}" fill="none" stroke="${up?'var(--gain)':'var(--loss)'}" stroke-width="2"/></svg>
+<p class="mute small">${when(points[0].t)} – ${when(points[points.length-1].t)} · Last ${cad(points[points.length-1].p)}</p>`;
+}
+
+function renderModal(){
+  if(!ui.view)return '';
+  if(ui.view.type==='chart'){
+    const t=ui.view.t,c=historyCache[t];
+    const body=!c||c.loading?'<p class="mute small">Loading…</p>':c.error?`<p class="mute small">${c.error}</p>`:renderChartSVG(c.points);
+    return `<div class="modal-back" data-modal-backdrop><div class="modal" role="dialog" aria-modal="true" aria-label="${t} price history"><div class="modal-top"><h2>${t} · Last 3 days</h2><button type="button" class="ghost" data-close-modal>Close</button></div>${body}</div></div>`;
+  }
+  const f=state.funds[ui.view.t],hh=f&&f.history.find(x=>x.id===ui.view.id);
+  if(!hh)return '';
+  const label=hh.kind==='add'?'Deposit':'Withdrawal';
+  return `<div class="modal-back" data-modal-backdrop><div class="modal" role="dialog" aria-modal="true" aria-label="Transaction details"><div class="modal-top"><h2>${label}</h2><button type="button" class="ghost" data-close-modal>Close</button></div>
+<dl class="stats"><div><dt>Fund</dt><dd>${ui.view.t}</dd></div><div><dt>Date</dt><dd>${new Date(hh.t).toLocaleString('en-CA',{dateStyle:'long',timeStyle:'short'})}</dd></div><div><dt>Amount</dt><dd>${cad(hh.amount)}</dd></div>${hh.shares!=null?`<div><dt>Shares</dt><dd>${hh.shares.toFixed(4)}</dd></div>`:''}${hh.price!=null?`<div><dt>Price</dt><dd>${cad(hh.price)}/sh</dd></div>`:''}</dl>
+<button type="button" class="danger" data-delete-tx>Delete this transaction</button></div></div>`;
+}
+
+function openChart(t){
+  ui.view={type:'chart',t};
+  const c=historyCache[t];
+  if(c&&!c.loading&&c.fetchedAt&&Date.now()-c.fetchedAt<300000){render();return}
+  loadHistory(t);
+}
+
+async function loadHistory(t){
+  historyCache[t]={loading:true,points:(historyCache[t]&&historyCache[t].points)||[],error:null,fetchedAt:historyCache[t]?historyCache[t].fetchedAt:0};
+  render();
+  try{
+    const r=await fetch('/api/history/'+encodeURIComponent(t),{cache:'no-store'});
+    if(!r.ok)throw new Error('bad');
+    const data=await r.json();
+    historyCache[t]={loading:false,points:Array.isArray(data)?data:[],error:null,fetchedAt:Date.now()};
+  }catch(e){
+    historyCache[t]={loading:false,points:[],error:'Could not load price history.',fetchedAt:Date.now()};
+  }
+  render();
+}
+
+function deleteHistoryEntry(t,id){
+  const f=state.funds[t];if(!f)return false;
+  const idx=f.history.findIndex(h=>h.id===id);if(idx<0)return false;
+  const hh=f.history[idx];
+  if(hh.kind==='add'){f.shares=Math.max(0,f.shares-(hh.shares||0));f.invested=Math.max(0,f.invested-(hh.amount||0));}
+  else{f.shares=Math.max(0,f.shares+(hh.shares||0));f.invested=Math.max(0,f.invested+(hh.amount||0));}
+  f.history.splice(idx,1);
+  return true;
 }
 
 function act(t,a,by,x,raw){
@@ -192,29 +294,46 @@ function act(t,a,by,x,raw){
       const n=x('amount'),sh=x('shares');if(!(n>0&&sh>0))return;
       const p=n/sh;
       f.shares+=sh;f.invested+=n;if(!f.price){f.price=p;f.at=now}
-      f.history.push({t:whenAt,kind:'add',amount:n,shares:sh,price:p});
+      f.history.push({id:uid(),t:whenAt,kind:'add',amount:n,shares:sh,price:p});
       m=`Added ${sh.toFixed(4)} shares for ${cad(n)} (${cad(p)}/share).`;
     }else{
       const p=x('price'),n=x('amount');if(!(p>0&&n>0))return;
       const sh=n/p;
       f.shares+=sh;f.invested+=n;if(!f.price){f.price=p;f.at=now}
-      f.history.push({t:whenAt,kind:'add',amount:n,shares:sh,price:p});
+      f.history.push({id:uid(),t:whenAt,kind:'add',amount:n,shares:sh,price:p});
       m=`Added ${cad(n)} at ${cad(p)}.`;
     }
   }
   else{const n=x('amount');if(!(n>0))return;
     if(f.invested<=0)m='Nothing to remove yet.';
     else if(n>f.invested+0.005)m=`You can remove up to ${cad(f.invested)}.`;
-    else{const before=f.shares,r=1-n/f.invested;f.shares*=r;f.invested-=n;if(f.invested<=0.005){f.shares=0;f.invested=0}f.history.push({t:now,kind:'remove',amount:n,shares:before-f.shares,price:null});m=`Removed ${cad(n)}.`}}
+    else{const before=f.shares,r=1-n/f.invested;f.shares*=r;f.invested-=n;if(f.invested<=0.005){f.shares=0;f.invested=0}f.history.push({id:uid(),t:now,kind:'remove',amount:n,shares:before-f.shares,price:null});m=`Removed ${cad(n)}.`}}
   ui.msg[t]=m;save();render();
 }
 
 
 app.addEventListener('submit',e=>{e.preventDefault();const f=e.target,d=new FormData(f);act(f.dataset.t,f.dataset.a,f.dataset.by,k=>parseFloat(d.get(k)),k=>d.get(k))});
 app.addEventListener('click',e=>{
+  if(e.target.matches('[data-modal-backdrop]')){ui.view=null;render();return}
+  const closeBtn=e.target.closest('[data-close-modal]');if(closeBtn){ui.view=null;render();return}
+  const delBtn=e.target.closest('[data-delete-tx]');
+  if(delBtn){
+    if(ui.view&&ui.view.type==='tx'&&confirm("Delete this transaction? Your shares and invested total will be adjusted to remove its effect.")){
+      deleteHistoryEntry(ui.view.t,ui.view.id);ui.view=null;save();render();
+    }
+    return;
+  }
+  const resetBtn=e.target.closest('[data-reset]');
+  if(resetBtn){
+    if(confirm("Reset all data? This clears every fund's shares, invested amount, and deposit history. This can't be undone.")){state=fresh();ui.view=null;save();render();}
+    return;
+  }
+  const chartBtn=e.target.closest('[data-chart]');if(chartBtn){openChart(chartBtn.dataset.t);return}
+  const hrow=e.target.closest('[data-id]');if(hrow){ui.view={type:'tx',t:hrow.dataset.t,id:hrow.dataset.id};render();return}
   const m=e.target.closest('[data-mode]');if(m){ui.mode[m.dataset.t]=m.dataset.mode;ui.msg[m.dataset.t]='';render();return}
   const ab=e.target.closest('[data-addby]');if(ab){ui.by[ab.dataset.t]=ab.dataset.addby;ui.msg[ab.dataset.t]='';render()}
 });
+document.addEventListener('keydown',e=>{if(e.key==='Escape'&&ui.view){ui.view=null;render()}});
 
 render();
 
