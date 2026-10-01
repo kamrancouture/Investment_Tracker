@@ -116,14 +116,21 @@ svg{width:100%;height:auto;display:block;margin-top:8px}
 .key i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px}
 .k1{background:var(--bar)}.k2{background:var(--act)}
 .ghost{min-height:32px;padding:0 10px;background:transparent;color:var(--act);border:1px solid var(--line);font-size:13px;margin-left:8px}
+details.hist{margin-top:10px}
+details.hist summary{cursor:pointer}
+ul.hlist{list-style:none;margin:8px 0 0;padding:0;max-height:160px;overflow-y:auto;border-top:1px solid var(--line)}
+ul.hlist li{display:flex;justify-content:space-between;gap:10px;padding:7px 0;border-bottom:1px solid var(--line);font-size:13px}
+ul.hlist li:last-child{border-bottom:0}
+ul.hlist .add{color:var(--gain)}ul.hlist .rem{color:var(--loss)}
+label.field{display:block;margin:2px 0 -2px}
 </style>
 </head>
 <body>
 <main id="app"></main>
 <script>
 const T=['VFV.TO','VSP.TO'],KEY='investment-tracker-v1',app=document.getElementById('app');
-const fresh=()=>({funds:Object.fromEntries(T.map(t=>[t,{shares:0,invested:0,price:null,at:null}]))});
-const clean=o=>{const s=fresh();try{T.forEach(t=>{const f=o.funds[t]||{};s.funds[t]={shares:+f.shares||0,invested:+f.invested||0,price:+f.price>0?+f.price:null,at:f.at||null}})}catch(e){}return s};
+const fresh=()=>({funds:Object.fromEntries(T.map(t=>[t,{shares:0,invested:0,price:null,at:null,history:[]}]))});
+const clean=o=>{const s=fresh();try{T.forEach(t=>{const f=(o.funds&&o.funds[t])||{};const hist=Array.isArray(f.history)?f.history.filter(h=>h&&typeof h.t==='string').map(h=>({t:h.t,kind:h.kind==='remove'?'remove':'add',amount:+h.amount||0,shares:h.shares!=null&&isFinite(+h.shares)?+h.shares:null,price:h.price!=null&&isFinite(+h.price)?+h.price:null})):[];s.funds[t]={shares:+f.shares||0,invested:+f.invested||0,price:+f.price>0?+f.price:null,at:f.at||null,history:hist}})}catch(e){}return s};
 let state=fresh(),ref=null,sync='Getting live prices…';
 try{state=clean(JSON.parse(localStorage.getItem(KEY)))}catch(e){}
 const save=()=>{try{localStorage.setItem(KEY,JSON.stringify(state))}catch(e){}};
@@ -134,7 +141,8 @@ const pct=n=>(n<0?'−':'+')+Math.abs(n).toFixed(2)+'%';
 const cls=n=>n<0?'loss':'gain';
 const when=iso=>new Date(iso).toLocaleString('en-CA',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});
 const val=f=>f.price&&f.shares>0?f.shares*f.price:null;
-const num=(name,ph)=>`<input name="${name}" type="number" inputmode="decimal" step="0.01" min="0.01" placeholder="${ph}" aria-label="${ph}" required>`;
+const num=(name,ph)=>`<input name="${name}" type="number" inputmode="decimal" step="any" min="0.0001" placeholder="${ph}" aria-label="${ph}" required>`;
+const dt=(name,ph)=>`<input name="${name}" type="datetime-local" aria-label="${ph}">`;
 const setSync=m=>{sync=m;const e=document.getElementById('sync');if(e)e.textContent=m};
 
 function render(){
@@ -145,13 +153,22 @@ function render(){
     const f=state.funds[t],v=val(f),mode=ui.mode[t]||'add',add=mode==='add',by=ui.by[t]||'amount';
     if(f.shares>0){held++;ti+=f.invested;if(v==null)unpriced++;else tv+=v}
     const g=v==null?null:v-f.invested;
-    const addFields=by==='shares'
+    const addFields=(by==='shares'
       ?`<div class="row">${num('amount','Amount invested')}${num('shares','Number of shares')}</div>`
-      :`<div class="row">${num('price','Purchase price')}${num('amount','Amount invested')}</div>`;
+      :`<div class="row">${num('price','Purchase price')}${num('amount','Amount invested')}</div>`)
+      +`<label class="field mute small">Date &amp; time (optional — defaults to now)</label>${dt('at','Date and time of purchase')}`;
+    const hist=[...f.history].sort((a,b)=>b.t.localeCompare(a.t));
+    const histRows=hist.length?hist.map(hh=>{
+      const line=hh.kind==='add'
+        ?`+${cad(hh.amount)}${hh.shares!=null?` · ${hh.shares.toFixed(4)} sh`:''}${hh.price!=null?` · ${cad(hh.price)}/sh`:''}`
+        :`−${cad(hh.amount)}${hh.shares!=null?` · ${hh.shares.toFixed(4)} sh`:''}`;
+      return `<li><span class="${hh.kind==='add'?'add':'rem'}">${line}</span><span class="mute">${when(hh.t)}</span></li>`;
+    }).join(''):'<li class="mute">No deposits yet.</li>';
     return `<section class="card"><div class="top"><h2>${t}</h2>
 <b>${f.price?cad(f.price):'–'}</b></div>
 <p class="mute small">${f.price?`Price ${cad(f.price)} as of ${when(f.at)}`:'Waiting for a live price.'}</p>
 <dl class="stats"><div><dt>Shares</dt><dd>${f.shares.toFixed(4)}</dd></div><div><dt>Invested</dt><dd>${cad(f.invested)}</dd></div><div><dt>Value</dt><dd>${v==null?'–':cad(v)}</dd></div><div><dt>Gain</dt><dd class="${g==null?'':cls(g)}">${g==null?'–':`${signed(g)} (${pct(g/f.invested*100)})`}</dd></div></dl>
+<details class="hist"><summary class="mute small">Deposit history (${hist.length})</summary><ul class="hlist">${histRows}</ul></details>
 <div class="seg"><button type="button" data-t="${t}" data-mode="add" aria-pressed="${add}">Add</button><button type="button" data-t="${t}" data-mode="remove" aria-pressed="${!add}">Remove</button></div>
 ${add?`<div class="seg sub"><button type="button" data-t="${t}" data-addby="amount" aria-pressed="${by==='amount'}">Price &amp; amount</button><button type="button" data-t="${t}" data-addby="shares" aria-pressed="${by==='shares'}">Amount &amp; shares</button></div>`:''}
 <form class="act" data-t="${t}" data-a="${add?'add':'remove'}" data-by="${by}">${add?addFields:num('amount','Amount to remove')}<button>${add?'Add investment':'Remove amount'}</button></form>
@@ -166,30 +183,34 @@ ${add?`<div class="seg sub"><button type="button" data-t="${t}" data-addby="amou
 <p class="mute small" style="margin-top:16px">Prices come from Yahoo Finance and may be delayed.</p>`;
 }
 
-function act(t,a,by,x){
+function act(t,a,by,x,raw){
   const f=state.funds[t],now=new Date().toISOString();let m='';
   if(a==='price'){const p=x('v');if(!(p>0))return;f.price=p;f.at=now;m='Price updated.'}
   else if(a==='add'){
+    const whenRaw=raw&&raw('at'),parsedAt=whenRaw?new Date(whenRaw):null,whenAt=parsedAt&&!isNaN(parsedAt)?parsedAt.toISOString():now;
     if(by==='shares'){
       const n=x('amount'),sh=x('shares');if(!(n>0&&sh>0))return;
       const p=n/sh;
       f.shares+=sh;f.invested+=n;if(!f.price){f.price=p;f.at=now}
+      f.history.push({t:whenAt,kind:'add',amount:n,shares:sh,price:p});
       m=`Added ${sh.toFixed(4)} shares for ${cad(n)} (${cad(p)}/share).`;
     }else{
       const p=x('price'),n=x('amount');if(!(p>0&&n>0))return;
-      f.shares+=n/p;f.invested+=n;if(!f.price){f.price=p;f.at=now}
+      const sh=n/p;
+      f.shares+=sh;f.invested+=n;if(!f.price){f.price=p;f.at=now}
+      f.history.push({t:whenAt,kind:'add',amount:n,shares:sh,price:p});
       m=`Added ${cad(n)} at ${cad(p)}.`;
     }
   }
   else{const n=x('amount');if(!(n>0))return;
     if(f.invested<=0)m='Nothing to remove yet.';
     else if(n>f.invested+0.005)m=`You can remove up to ${cad(f.invested)}.`;
-    else{const r=1-n/f.invested;f.shares*=r;f.invested-=n;if(f.invested<=0.005){f.shares=0;f.invested=0}m=`Removed ${cad(n)}.`}}
+    else{const before=f.shares,r=1-n/f.invested;f.shares*=r;f.invested-=n;if(f.invested<=0.005){f.shares=0;f.invested=0}f.history.push({t:now,kind:'remove',amount:n,shares:before-f.shares,price:null});m=`Removed ${cad(n)}.`}}
   ui.msg[t]=m;save();render();
 }
 
 
-app.addEventListener('submit',e=>{e.preventDefault();const f=e.target,d=new FormData(f);act(f.dataset.t,f.dataset.a,f.dataset.by,k=>parseFloat(d.get(k)))});
+app.addEventListener('submit',e=>{e.preventDefault();const f=e.target,d=new FormData(f);act(f.dataset.t,f.dataset.a,f.dataset.by,k=>parseFloat(d.get(k)),k=>d.get(k))});
 app.addEventListener('click',e=>{
   const m=e.target.closest('[data-mode]');if(m){ui.mode[m.dataset.t]=m.dataset.mode;ui.msg[m.dataset.t]='';render();return}
   const ab=e.target.closest('[data-addby]');if(ab){ui.by[ab.dataset.t]=ab.dataset.addby;ui.msg[ab.dataset.t]='';render()}
